@@ -1,74 +1,70 @@
-import socket
+import serial
 import time
+import math
 
-ARDUINO_IP = "10.33.110.199"
-PORT = 8080
+SERIAL_PORT = "COM3"       # <-- update to match your Arduino's port (Windows: COMx, Linux/Mac: /dev/ttyACM0 etc.)
+BAUD_RATE = 115200
 NUM_LEDS = 24
 
-# DEMO SCALING
-# ------------
-# We're pretending the 24-LED ring is a 200m indoor track. At real running
-# paces (a few km/h to low double digits), a lap of a 200m track takes tens
-# of seconds to minutes - way longer than a few-second demo. Played back at
-# literal real-time, the dot barely creeps (which is why it looked broken:
-# you were seeing ~2 of the 3 trail LEDs sit almost still, not a moving
-# blip). DEMO_TIME_SCALE fixes this by fast-forwarding wall-clock time for
-# the position calculation only - think of it as watching a time-lapse of
-# the runner. At 25x, the default demo (7.2 km/h uniform pace, 4s window)
-# plays out as exactly one full lap of the ring. Turn this up for a faster
-# whiz, down for a slower, more "real-time" crawl.
-TRACK_LENGTH_M = 200.0
-DEMO_TIME_SCALE = 25.0
+TRACK_LENGTH_M = 0.200
+DEMO_TIME_SCALE = 1
+BRIGHTNESS = 1
 
-# Scales every color sent to the strip. 1.0 = full brightness (whatever
-# value each function passes in, e.g. green's 255), 0.0 = off. Applied once
-# in send_frame() below, so it affects the countdown flashes and the trail
-# uniformly - no need to touch color values in multiple places.
-BRIGHTNESS = 0.05
-
-_sock = None
+_ser = None
 
 
 def connect():
-    """Opens (or re-opens) the single persistent connection to the Arduino."""
-    global _sock
-    if _sock is not None:
+    global _ser
+    if _ser is not None:
         try:
-            _sock.close()
+            _ser.close()
         except Exception:
             pass
-    _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    _sock.settimeout(2.0)
-    _sock.connect((ARDUINO_IP, PORT))
-    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    _ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2.0)
+    # Opening the port resets the R4 (like an Uno). Give it time to
+    # finish setup() before we start sending frames.
+    time.sleep(2.0)
 
 
 def send_frame(commands):
-    """
-    Sends a batch of (index, r, g, b) tuples in ONE write over the
-    persistent connection. This is the key fix from earlier: previously
-    every single command opened a fresh TCP connection, which couldn't
-    keep up with the ~40ms frame rate and left the Arduino processing a
-    backlog of stale connections. The sketch already reads 4-byte chunks
-    in a loop, so multiple commands can safely ride in a single packet.
-    """
-    global _sock
-    payload = bytearray()
+    global _ser
+    # Build a full frame of colors for all LEDs
+    frame_colors = [[0, 0, 0] for _ in range(NUM_LEDS)]
     for index, r, g, b in commands:
-        r = int(r * BRIGHTNESS)
-        g = int(g * BRIGHTNESS)
-        b = int(b * BRIGHTNESS)
-        payload += bytes([int(index) % NUM_LEDS, r & 0xFF, g & 0xFF, b & 0xFF])
+        idx = int(index) % NUM_LEDS
+        frame_colors[idx] = [
+            int(r * BRIGHTNESS) & 0xFF,
+            int(g * BRIGHTNESS) & 0xFF,
+            int(b * BRIGHTNESS) & 0xFF
+        ]
+
+    # Payload format: [SYNC_BYTE (0xFF), r0, g0, b0, r1, g1, b1, ..., checksum]
+    payload = bytearray([0xFF])
+    color_bytes = bytearray()
+    for r, g, b in frame_colors:
+        # Avoid sending 0xFF in color bytes to prevent sync byte collision
+        if r == 0xFF: r = 0xFE
+        if g == 0xFF: g = 0xFE
+        if b == 0xFF: b = 0xFE
+        color_bytes.append(r)
+        color_bytes.append(g)
+        color_bytes.append(b)
+
+    checksum = 0
+    for byte in color_bytes:
+        checksum ^= byte
+
+    payload.extend(color_bytes)
+    payload.append(checksum)
+
     try:
-        _sock.sendall(payload)
-    except (BrokenPipeError, ConnectionResetError, OSError):
-        # Link dropped mid-show - reconnect once and retry this frame
+        _ser.write(payload)
+    except (serial.SerialException, OSError):
         connect()
-        _sock.sendall(payload)
+        _ser.write(payload)
 
 
 def send_command(index, r, g, b):
-    """Single-LED convenience wrapper, still batched under the hood."""
     send_frame([(index, r, g, b)])
 
 
@@ -77,30 +73,21 @@ def clear_all():
 
 
 def render_trail(position):
-    """
-    Draws a solid, 3-LED-wide GREEN blip centered on `position`, all three
-    dots at equal full brightness so all three are clearly visible.
-
-    Wraparound is handled by `% NUM_LEDS`: as `position` sweeps past 23.x,
-    `int(position + 1) % NUM_LEDS` rolls over from 23 to 0, so the blip
-    flows straight from the last LED back to the first - the ring is
-    treated as infinite/circular, no special-casing needed.
-    """
     frame = [(i, 0, 0, 0) for i in range(NUM_LEDS)]
     for offset in (-1, 0, 1):
-        idx = int(position + offset) % NUM_LEDS
-        frame[idx] = (idx, 0, 255, 0)  # pure green, full brightness
+        idx = int(math.floor(position + offset)) % NUM_LEDS
+        frame[idx] = (idx, 0, 255, 0)
     send_frame(frame)
 
 
 def countdown_flash():
     print("Get ready... 3, 2, 1...")
     colors = [
-        (255, 0, 0),  # 1: Red
-        (0,0,0),      # 2. Blank
-        (255,165, 0), # 3: Orange
-        (0,0,0),      # 4. Blank
-        (0, 255, 0)   # 5: Green (Go)
+        (255, 0, 0),
+        (0, 0, 0),
+        (255, 165, 0),
+        (0, 0, 0),
+        (0, 255, 0),
     ]
     for color in colors:
         send_frame([(i, *color) for i in range(NUM_LEDS)])
@@ -173,24 +160,12 @@ def main():
     connect()
     clear_all()
     time.sleep(0.2)
- 
-    countdown_flash()
-    time.sleep(0.2)
-    run_uniform_pacing(target_speed_kmh=7.2, duration_sec=10.0)
-    time.sleep(0.3)
- 
-    countdown_flash()
-    time.sleep(0.2)
-    run_acceleration(start_speed_kmh=0, target_speed_kmh=30, duration_sec=30.0)
-    time.sleep(0.3)
- 
-    countdown_flash()
-    time.sleep(0.2)
-    run_deceleration(start_speed_kmh=12.6, target_speed_kmh=0.0, duration_sec=15.0)
- 
+
+    run_uniform_pacing(10,10)
+
     clear_all()
-    _sock.close()
-    print("Pacing sequence complete!")
+    _ser.close()
+
 
 if __name__ == "__main__":
     main()
