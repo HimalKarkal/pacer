@@ -1,67 +1,44 @@
-#include <WiFiS3.h>
 #include <Adafruit_NeoPixel.h>
 
-const char* ssid     = "Pixel_9355";
-const char* password = "scottjurek";
-
 #define LED_PIN    6
-#define LED_COUNT 24
+#define LED_COUNT  24
+#define SYNC_BYTE  0xFF
+#define BAUD_RATE  115200
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
-WiFiServer server(8080);
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(BAUD_RATE);
   strip.begin();
-  strip.show(); // Turn off all pixels initially
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  // Wait for a valid IP assignment from the hotspot
-  while (WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
-    delay(500);
-    Serial.print("w");
-  }
-
-  Serial.println("\nWiFi connected!");
-  Serial.print("Arduino IP Address: ");
-  Serial.println(WiFi.localIP());
-
-  server.begin();
+  strip.show();
 }
 
 void loop() {
-  WiFiClient client = server.available();
+  // Look for the sync byte to align the stream
+  while (Serial.available() > 0) {
+    uint8_t incoming = Serial.read();
 
-  if (client) {
-    while (client.connected()) {
-      // Drain everything currently buffered, then refresh the strip once.
-      // (Previously strip.show() fired after every single 4-byte command,
-      // which added latency and made a batched frame render pixel-by-pixel
-      // instead of all at once.)
-      bool dirty = false;
-      while (client.available() >= 4) {
-        uint8_t index = client.read();
-        uint8_t r     = client.read();
-        uint8_t g     = client.read();
-        uint8_t b     = client.read();
-
-        if (index < LED_COUNT) {
-          strip.setPixelColor(index, strip.Color(r, g, b));
-          dirty = true;
-        }
-      }
-      if (dirty) {
-        strip.show();
-      }
-      // Small yield to let the WiFi stack breathe
-      yield();
+    if (incoming != SYNC_BYTE) {
+      continue;
     }
-    client.stop();
+
+    // Wait until the remaining LED_COUNT * 3 bytes of the frame arrive
+    const int expectedBytes = LED_COUNT * 3;
+    unsigned long startTime = millis();
+    while (Serial.available() < expectedBytes) {
+      if (millis() - startTime > 50) { // Timeout safety net
+        break;
+      }
+    }
+
+    if (Serial.available() >= expectedBytes) {
+      for (int i = 0; i < LED_COUNT; i++) {
+        uint8_t r = Serial.read();
+        uint8_t g = Serial.read();
+        uint8_t b = Serial.read();
+        strip.setPixelColor(i, strip.Color(r, g, b));
+      }
+      strip.show();
+    }
   }
 }
