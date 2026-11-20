@@ -6,9 +6,9 @@ SERIAL_PORT = "COM3"       # <-- update to match your Arduino's port (Windows: C
 BAUD_RATE = 115200
 NUM_LEDS = 24
 
-TRACK_LENGTH_M = 200.0
-DEMO_TIME_SCALE = 25.0
-BRIGHTNESS = 0.05
+TRACK_LENGTH_M = 0.200
+DEMO_TIME_SCALE = 1
+BRIGHTNESS = 1
 
 _ser = None
 
@@ -161,8 +161,8 @@ def main():
     clear_all()
     time.sleep(0.2)
 
-    countdown_flash()
-    run_acceleration(0, 30, 15)
+    run_uniform_pacing(10,10)
+
     clear_all()
     _ser.close()
 
